@@ -22,7 +22,46 @@ Tip: elementwise + 行内归约的 kernel 大概率是带宽瓶颈，可以想�
 import torch
 import tilelang
 import tilelang.language as T
+from typing import Dict, Tuple
+
+_kernel_cache: Dict[Tuple[int, int], object] = {}
+
+def _make_softmax_kernel(M: int, N: int):
+    key = (M, N)
+    if key in _kernel_cache:
+        return _kernel_cache[key]
+
+    padded_N = 1 << (N - 1).bit_length() if N > 0 else 1
+
+    @T.prim_func
+    def kernel(X: T.Tensor((M, N), "float32"),
+               Y: T.Tensor((M, N), "float32")):
+        with T.Kernel(M, threads=128) as row:
+            frag = T.alloc_fragment((padded_N,), dtype="float32")
+            max_val = T.alloc_fragment((1,), dtype="float32")
+            sum_val = T.alloc_fragment((1,), dtype="float32")
+
+            for j in T.Parallel(padded_N):
+                frag[j] = T.if_then_else(
+                    j < N, X[row, j], -T.infinity("float32")
+                )
+
+            T.reduce_max(frag, max_val, dim=0)
+            for j in T.Parallel(padded_N):
+                frag[j] = T.exp(frag[j] - max_val[0])
+
+            T.reduce_sum(frag, sum_val, dim=0)
+            for j in T.Parallel(N):
+                Y[row, j] = frag[j] / sum_val[0]
+
+    mod = tilelang.compile(kernel, out_idx=[1])
+    _kernel_cache[key] = mod
+    return mod
 
 
 def softmax(x: torch.Tensor) -> torch.Tensor:
-    raise NotImplementedError("从这里开始写")
+
+    assert x.is_cuda and x.dtype == torch.float32
+    M, N = x.shape
+    mod = _make_softmax_kernel(M, N)
+    return mod(x)

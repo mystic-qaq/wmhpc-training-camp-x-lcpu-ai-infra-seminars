@@ -18,6 +18,40 @@ contract: 实现 run(program) -> (regs, cycles)
 通过 pytest tests/test_simt_sim.py 即为完成。
 """
 
-
 def run(program):
-    raise NotImplementedError("从这里开始写")
+    
+    regs = list(range(32))
+
+    def execute(prog, mask):
+        cycles = 0
+        if mask == 0:
+            return 0
+        for inst in prog:
+            op = inst[0]
+            if op == 'add' or op == 'mul':
+                cycles += 1
+                k = inst[1]
+                for i in range(32):
+                    if mask & (1 << i):
+                        if op == 'add':
+                            regs[i] += k
+                        else: 
+                            regs[i] *= k
+            elif op == 'if_lt':
+                t = inst[1]
+                then_prog = inst[2]
+                else_prog = inst[3]
+                true_mask = 0
+                false_mask = 0
+                for i in range(32):
+                    if mask & (1 << i):         
+                        if regs[i] < t:
+                            true_mask |= (1 << i)
+                        else:
+                            false_mask |= (1 << i)
+                cycles += execute(then_prog, true_mask)
+                cycles += execute(else_prog, false_mask)
+        return cycles
+
+    total_cycles = execute(program, (1 << 32) - 1)
+    return regs, total_cycles
