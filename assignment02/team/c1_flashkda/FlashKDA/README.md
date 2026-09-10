@@ -19,6 +19,14 @@ git submodule update --init --recursive
 pip install -v --no-build-isolation .
 ```
 
+For the assignment snapshot, CUTLASS is checked out next to the snapshot
+rather than inside it.  Point the build at that checkout explicitly:
+
+```bash
+export FLASH_KDA_CUTLASS_DIR=/path/to/assignment02/FlashKDA/cutlass
+pip install -v --no-build-isolation .
+```
+
 By default, the build detects the current CUDA device and compiles for that architecture. For wheel or CI builds, compile all supported architectures explicitly:
 
 ```bash
@@ -37,7 +45,7 @@ Once installed, FlashKDA is auto-dispatched from `flash-linear-attention`'s `chu
    ```bash
    pip install -U flash-linear-attention
    ```
-2. Call `chunk_kda` under `torch.inference_mode()` 
+2. Call `chunk_kda` under `torch.inference_mode()`
    ```python
    import torch
    from fla.ops.kda import chunk_kda
@@ -61,11 +69,59 @@ Once installed, FlashKDA is auto-dispatched from `flash-linear-attention`'s `chu
 
 **Opt out:** set `FLA_FLASH_KDA=0` to fall back to the Triton path.
 
+On SM10.x (Blackwell), the recurrence uses a conservative shape heuristic to
+split the independent value rows when the number of heads is small.  The
+heuristic is disabled on other architectures.  Its current policy is:
+
+| shape | automatic mapping |
+|---|---|
+| one sequence, `H<=16` | `V_TILE=16`, one block per warp |
+| one sequence, `17<=H<=32`, `T<=64` | `V_TILE=16`, one block per warp |
+| one sequence, `17<=H<=32`, `T>64` | `V_TILE=32`, one block per warp |
+| one sequence, otherwise `H<=64` | `V_TILE=64`, one block per warp |
+| one sequence, `H=65..96`, BF16/no state | `V_TILE=64`, one block per warp |
+| one sequence, FP32 state outside the cases above | original `V_TILE=128` mapping |
+| packed/varlen, `H<=4` | `V_TILE=16` for small `N`/`H`, otherwise `V_TILE=32` |
+| packed/varlen, `H=5..16`, `N<=2` | `V_TILE=32`, one block per warp |
+| packed/varlen, `H=5..16`, long FP32 or large-N case | original `V_TILE=128` mapping |
+| other packed/varlen, measured small-chain case | `V_TILE=64`, one block per warp |
+| other packed/varlen | original `V_TILE=128` mapping |
+
+This policy is deliberately B300-measured rather than universally optimal; the
+original mapping remains available as a fallback.  For experiments or fixed
+deployments, the mapping can be overridden at dispatch time:
+
+```bash
+# Recommended mapping for the B300 TP8/K3 shape (H=12, long fixed sequence)
+export FLASH_KDA_V_TILE=16
+export FLASH_KDA_BLOCKS_PER_WARP=1
+
+# Force the original one-CTA-per-head mapping
+export FLASH_KDA_V_TILE=128
+export FLASH_KDA_BLOCKS_PER_WARP=2
+```
+
+The supported `FLASH_KDA_V_TILE` values are `128`, `64`, `32`, and `16`.  For a
+split tile, one block per warp is the default; `FLASH_KDA_BLOCKS_PER_WARP=2`
+selects the original denser warp mapping.  The variables are optional: when
+unset, the SM10.x heuristic chooses a mapping from `H`, sequence packing, and
+state dtype.  Builds enable the B-layout publication optimization by default;
+set `FLASH_KDA_NVCC_DEFINES=` only for an A/B build without it.  The automatic
+state-update warp count is 8 for `V_TILE=16/64`, 4 for `V_TILE=32`, and 0 for
+the original `V_TILE=128` mapping.  It can be overridden for experiments with
+`FLASH_KDA_STATE_UPDATE_WARPS=0`, `4`, `8`, `16`, or `auto`.  The legacy
+`FLASH_KDA_PARALLEL_STATE_UPDATE=0/1` variable remains an alias for disabling
+or enabling the parallel path.
+
 **Debug dispatch:** add `logging.basicConfig(level=logging.INFO)` to see `[FLA Backend] kda.chunk_kda -> flashkda` on hit, or `... rejected: <reason>` on miss.
 
 ## Performance
 
 See [BENCHMARK_H20.md](BENCHMARK_H20.md).
+
+The B300/SM103 optimization measurements, including mapping tables and the
+correctness/NCU/SASS evidence, are recorded in
+[`../results/final_optimization_b300.md`](../results/final_optimization_b300.md).
 
 ## Tests
 
@@ -74,6 +130,8 @@ bash tests/test.sh
 ```
 
 - `tests/test_fwd.py` — correctness tests (exact match against the torch reference; compared with `flash-linear-attention`)
+- The assignment validation matrix is `tests/test_fwd_full.py`; the final
+  SM103 build passed all 580 cases.
 
 
 ## Kernel API

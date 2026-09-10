@@ -1,0 +1,10 @@
+Command:
+  cuobjdump --dump-sass build/tcgen05_2sm_state_update_latest
+
+Relevant SASS lines (CUDA 13.0, -arch=sm_103a):
+  1174: @UP0 UTCHMMA.2CTA gdesc[UR8], gdesc[UR6], tmem[UR36], tmem[UR4], idesc[UR5], !UPT
+  1588: @UP0 UTCHMMA.2CTA gdesc[UR8], gdesc[UR6], tmem[UR36], tmem[UR4], idesc[UR5], !UPT
+
+The two occurrences are the two peer-cluster state-update paths emitted by
+the 2SM experiment.  The corresponding single-CTA HMMA reference contains
+HMMA.16816.F32.BF16 instructions and no UTCHMMA.2CTA.

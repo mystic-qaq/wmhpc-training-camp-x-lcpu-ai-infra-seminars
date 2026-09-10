@@ -1,0 +1,15 @@
+CUTLASS TMEM layout evidence (layout_dump)
+==========================================
+
+64x16 FP32 accumulator layout:
+  tmem layout=(((_16,_4),_16),_1,_1):(((_65536,_2097152),_1),_0,_0)
+  coalesced=(_16,_4,_16):(_65536,_2097152,_1)
+
+Tmem copy upcast layouts:
+  SM100_TMEM_LOAD_32dp32b1x: upcast=(_1,_32):(_1,_65536)
+  SM100_TMEM_LOAD_16dp32b1x: upcast=(_2,_16):(_1,_65536)
+
+The 16dp32b1x form matches the 64x16 accumulator fragment and compiles/runs
+correctly in the microbenchmark; the default 32dp32b1x form does not match
+this fragment.  This is a concrete example of why switching to UMMA also
+requires a TMEM layout/epilogue redesign, not just replacing `gemm()`.

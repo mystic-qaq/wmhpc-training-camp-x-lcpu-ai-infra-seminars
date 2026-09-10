@@ -1,0 +1,56 @@
+metric columns: dram throughput (% peak), L1/TEX throughput (% peak, active), L1/TEX throughput (% peak, elapsed), L2 throughput (% peak), SM throughput (% peak), tensor pipe active (% peak), tensor pipe elapsed (% peak), HMMA pipe active (% peak), HMMA pipe elapsed (% peak), TMA pipe active (% peak), TMA pipe elapsed (% peak), TMA load instructions, TMA store instructions, UMMA matrix instructions, SM active warps (% peak), registers/thread, registers/thread allocated, shared memory/block (KiB), shared memory/block allocated (KiB), theoretical occupancy: registers, theoretical occupancy: shared memory, theoretical occupancy: warps, theoretical occupancy: blocks, theoretical occupancy: barriers, occupancy per register count, occupancy per shared-memory size, cluster occupancy (%), kernel duration
+values (first invocation of each kernel):
+[prepare] id=0 block=(256, 1, 1) grid=(512, 24, 1)
+  dram throughput (% peak) = 47.104575 %
+  L1/TEX throughput (% peak, active) = 65.499710 %
+  SM throughput (% peak) = 64.515732 %
+  tensor pipe active (% peak) = 5.465315 %
+  tensor pipe elapsed (% peak) = 5.169079 %
+  HMMA pipe active (% peak) = 5.465315 %
+  HMMA pipe elapsed (% peak) = 5.169079 %
+  TMA pipe active (% peak) = 7.576914 %
+  TMA pipe elapsed (% peak) = 7.166224 %
+  TMA load instructions = 61440.000000 inst
+  TMA store instructions = 651264.000000 inst
+  UMMA matrix instructions = 0 byte
+  SM active warps (% peak) = 94.376875 %
+  registers/thread = 32 register/thread
+  registers/thread allocated = 32.000000 register/thread
+  shared memory/block (KiB) = 22.272000 Kbyte/block
+  shared memory/block allocated (KiB) = 22.272000 Kbyte/block
+  theoretical occupancy: registers = 8.000000 block
+  theoretical occupancy: shared memory = 9.000000 block
+  theoretical occupancy: warps = 8.000000 block
+  theoretical occupancy: blocks = 32.000000 block
+  theoretical occupancy: barriers = 32.000000 block
+  occupancy per register count = 5504
+  occupancy per shared-memory size = 9072
+  cluster occupancy (%) = 0 %
+  kernel duration = 74.784000 us
+[recurrence] id=1 block=(256, 1, 1) grid=(1, 96, 1)
+  dram throughput (% peak) = 8.448452 %
+  L1/TEX throughput (% peak, active) = 38.326677 %
+  SM throughput (% peak) = 16.031910 %
+  tensor pipe active (% peak) = 14.399845 %
+  tensor pipe elapsed (% peak) = 9.143017 %
+  HMMA pipe active (% peak) = 14.399845 %
+  HMMA pipe elapsed (% peak) = 9.143017 %
+  TMA pipe active (% peak) = 8.662542 %
+  TMA pipe elapsed (% peak) = 5.500182 %
+  TMA load instructions = 2852352.000000 inst
+  TMA store instructions = 198144.000000 inst
+  UMMA matrix instructions = 0 byte
+  SM active warps (% peak) = 12.496754 %
+  registers/thread = 65 register/thread
+  registers/thread allocated = 72.000000 register/thread
+  shared memory/block (KiB) = 56.320000 Kbyte/block
+  shared memory/block allocated (KiB) = 56.320000 Kbyte/block
+  theoretical occupancy: registers = 3.000000 block
+  theoretical occupancy: shared memory = 3.000000 block
+  theoretical occupancy: warps = 8.000000 block
+  theoretical occupancy: blocks = 32.000000 block
+  theoretical occupancy: barriers = 6.000000 block
+  occupancy per register count = 3736
+  occupancy per shared-memory size = 6264
+  cluster occupancy (%) = 0 %
+  kernel duration = 397.760000 us

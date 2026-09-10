@@ -1,0 +1,23 @@
+SASS evidence from the final team V-split build on B300
+=========================================================
+
+Binary:
+  assignment02/team/c1_flashkda/FlashKDA/flash_kda_C.cpython-312-x86_64-linux-gnu.so
+
+Build arch:
+  sm_103a
+
+Command:
+  cuobjdump --dump-sass flash_kda_C.cpython-312-x86_64-linux-gnu.so
+
+Counts in the dumped SASS:
+  HMMA.16816.F32.BF16   5888
+  HMMA.16816.F16          24
+  UTMALDG.3D            4846
+  UTCHMMA / UTCMMA / TCGEN05 / WGMMA   no matching lines
+
+The larger HMMA/TMA counts compared with the original binary are expected:
+the final extension contains explicit V128, V64 and V32 template variants.
+No tcgen05 instruction was inserted into the production path; the measured
+positive result is a CTA-level parallelism optimization built on the portable
+HMMA path.

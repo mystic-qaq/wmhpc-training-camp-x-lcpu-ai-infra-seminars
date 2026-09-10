@@ -1,0 +1,36 @@
+FlashKDA C1 tcgen05-vs-mma microbenchmark
+===========================================
+
+Device: NVIDIA B300 SXM6 AC, compute capability 10.3, CUDA 13.0
+CUTLASS: 5c149f52a436782210263fb2f19b354443a61c6a
+Logical operation: BF16 16x16x16, FP32 output/accumulation
+tcgen05 operation: BF16 64x16x16, with rows 16..63 padding the logical task
+repeats: 5000 (copy/allocation/epilogue outside the repeated MMA loop)
+
+Two immediate 5000-repeat runs (small clock noise is expected):
+
+  run A: tcgen05=85.20 ns / padded, 21.30 ns / useful;
+         mma_sync=11.51 ns / logical, raw=7.404x, useful=1.851x
+  run B: tcgen05=85.21 ns / padded, 21.30 ns / useful;
+         mma_sync=11.50 ns / logical, raw=7.411x, useful=1.853x
+
+The earlier 5000-repeat run was 85.22 ns / 11.49 ns (useful-work ratio
+1.854x), so the stable conclusion is approximately 1.85x slower after
+padding normalization.
+
+Correctness:
+
+  tcgen05 bad=0
+  mma_sync bad=0
+  max(tc-mma)=0
+
+SASS cross-check (cuobjdump --dump-sass build/tcgen05_vs_mma):
+
+  UTCHMMA count=10
+  LDTM count=16
+  HMMA.16816.F32.BF16 count=58 (the SM80 comparison kernel)
+
+The normalized comparison is the fairer one for this experiment: the
+smallest 1-CTA BF16 UMMA tested on SM100/SM103 has M=64, so four times as many
+rows are computed to obtain one 16x16 logical result. This is a one-CTA
+instruction/protocol microbenchmark, not a replacement FlashKDA kernel.

@@ -4,7 +4,23 @@ from setuptools import setup
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension, CUDA_HOME
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
-subprocess.run(["git", "submodule", "update", "--init", "cutlass"])
+
+# The assignment snapshot intentionally keeps CUTLASS outside this copy of
+# FlashKDA.  Allow the checked-out submodule supplied by the handout to be
+# used directly, while retaining the upstream behavior for a normal clone.
+cutlass_dir = os.getenv("FLASH_KDA_CUTLASS_DIR")
+if cutlass_dir:
+    cutlass_dir = os.path.abspath(cutlass_dir)
+else:
+    cutlass_dir = os.path.join(this_dir, "cutlass")
+    subprocess.run(["git", "submodule", "update", "--init", "cutlass"],
+                   cwd=this_dir, check=False)
+
+if not os.path.isdir(os.path.join(cutlass_dir, "include")):
+    raise RuntimeError(
+        "CUTLASS was not found. Set FLASH_KDA_CUTLASS_DIR to the CUTLASS "
+        "checkout (the assignment provides it outside the FlashKDA snapshot)."
+    )
 
 
 def is_flag_set(flag: str) -> bool:
@@ -14,6 +30,14 @@ def is_flag_set(flag: str) -> bool:
 def get_nvcc_thread_args():
     nvcc_threads = os.getenv("NVCC_THREADS") or "32"
     return ["--threads", nvcc_threads]
+
+
+def get_nvcc_defines():
+    # The B-layout publication is part of the production SM10.x path.  It
+    # removes a register permutation before the dedicated state-update warps
+    # consume U.  Keep the override for controlled A/B experiments.
+    values = os.getenv("FLASH_KDA_NVCC_DEFINES", "FLASH_KDA_DIRECT_B_LAYOUT")
+    return [f"-D{value.strip()}" for value in values.split(",") if value.strip()]
 
 
 SUPPORTED_CUDA_ARCHS = ["90a", "100a", "103a", "120a"]
@@ -60,9 +84,9 @@ ext_modules = [
             'csrc/smxx/fwd_launch.cu',
         ],
         include_dirs=[
-            os.path.join(this_dir, 'cutlass', 'include'),
-            os.path.join(this_dir, 'cutlass', 'examples', 'common'),
-            os.path.join(this_dir, 'cutlass', 'tools', 'util', 'include'),
+            os.path.join(cutlass_dir, 'include'),
+            os.path.join(cutlass_dir, 'examples', 'common'),
+            os.path.join(cutlass_dir, 'tools', 'util', 'include'),
             os.path.join(this_dir, 'csrc'),
         ],
         extra_compile_args={
@@ -79,6 +103,7 @@ ext_modules = [
                 '--ptxas-options=-v,--register-usage-level=10,--warn-on-spills',
                 '-lineinfo',
                 *get_nvcc_thread_args(),
+                *get_nvcc_defines(),
                 *get_arch_flags(),
             ],
         },

@@ -37,6 +37,9 @@ __pycache__/
 
 # CUDA build artifacts
 assignment*/cuda/bin/
+assignment*/team/*/build/
+assignment*/team/*/experiments/*.bin
+assignment*/team/*/results/*.ncu-rep
 *.o
 *.ptx
 *.cubin
@@ -45,6 +48,7 @@ assignment*/cuda/bin/
 
 # Misc
 .DS_Store
+assignment*/team/*/plot*.png
 
 # User personal files
 cof.md

@@ -1,0 +1,25 @@
+SASS evidence from the final +final team build on B300
+========================================================
+
+Binary used for the dump:
+  assignment02/team/c1_flashkda/FlashKDA/build/lib.linux-x86_64-cpython-312/flash_kda_C.cpython-312-x86_64-linux-gnu.so
+
+Build:
+  CUDA 13.0, FLASH_KDA_CUDA_ARCHS=103a
+  FLASH_KDA_DIRECT_B_LAYOUT is enabled by the default setup.py define
+
+Command:
+  cuobjdump --dump-sass flash_kda_C.cpython-312-x86_64-linux-gnu.so
+
+Counts in the dumped SASS:
+      24 HMMA.16816.F16
+   23696 HMMA.16816.F32.BF16
+     324 UTMALDG.1D
+     324 UTMALDG.2D
+   22298 UTMALDG.3D
+       0 UTCHMMA / UTCMMA / TCGEN05 / WGMMA
+
+The production positive result therefore still uses warp-level HMMA plus TMA
+loads/stores.  The improvement is from CTA/value-slice parallelism, persistent
+state fragments, and overlap with dedicated state-update warps; no tcgen05
+opcode is present in this binary.

@@ -1,5 +1,7 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
+#include <cstdlib>
+#include <cstring>
 #include "fwd.h"
 
 int64_t get_workspace_size(
@@ -121,15 +123,16 @@ void fwd(
     auto k_ptr = reinterpret_cast<cutlass::bfloat16_t const*>(k_3d.data_ptr<at::BFloat16>());
     auto v_ptr = reinterpret_cast<cutlass::bfloat16_t const*>(v_3d.data_ptr<at::BFloat16>());
     auto g_ptr = reinterpret_cast<cutlass::bfloat16_t const*>(g_3d.data_ptr<at::BFloat16>());
+    // Kernel 1/2 consume beta in the [H, T_total] layout.  Keeping this
+    // transpose also makes beta a contiguous 1-D TMA source; the attempted
+    // direct [T_total, H] loads were substantially slower on B300.
+    auto beta_t = beta_2d.t().contiguous();
+    auto beta_t_ptr = reinterpret_cast<cutlass::bfloat16_t const*>(beta_t.data_ptr<at::BFloat16>());
     float scale_f = scale;
     auto out_ptr = reinterpret_cast<cutlass::bfloat16_t*>(out_3d.data_ptr<at::BFloat16>());
     auto A_log_ptr = A_log.data_ptr<float>();
     auto dt_bias_ptr = dt_bias.data_ptr<float>();
     float gate_scale = float(lower_bound * 1.4426950408889634);
-
-    // Transpose beta: [T_total, H] -> [H, T_total] (1D TMA, no T alignment constraint)
-    auto beta_t = beta_2d.t().contiguous();
-    auto beta_t_ptr = reinterpret_cast<cutlass::bfloat16_t const*>(beta_t.data_ptr<at::BFloat16>());
 
     auto workspace_ptr = workspace.data_ptr();
 
@@ -180,38 +183,218 @@ void fwd(
         total_tiles = int(N_val * ((T_seq + CHUNK - 1) / CHUNK));   // exact for batched
     }
 
-    // Dispatch based on state configuration and varlen
-    #define LAUNCH(HI, HO, FP32, VL) \
-        launch_fwd<128, HI, HO, FP32, VL>( \
+    // Dispatch based on state configuration, varlen, V-split mapping, and
+    // the optional parallel state-update implementation.
+    // On Blackwell, the small-head-count cases benefit from exposing the
+    // independent value rows as multiple CTAs.  The heuristic is deliberately
+    // conservative: it is enabled only for SM10.x and only for shapes that
+    // were measured to improve on B300.  An explicit V_TILE always wins, so
+    // FLASH_KDA_V_TILE=128 is also the compatibility/performance escape hatch.
+    int v_tile = -1;
+    bool v_tile_override = false;
+    if (const char* v_tile_env = std::getenv("FLASH_KDA_V_TILE")) {
+        v_tile = std::atoi(v_tile_env);
+        v_tile_override = true;
+    }
+
+    cudaDeviceProp device_prop{};
+    bool is_blackwell =
+        cudaGetDeviceProperties(&device_prop, q.get_device()) == cudaSuccess &&
+        device_prop.major == 10;
+
+    // ``avg_len`` is useful in packed mode because the same number of
+    // sequence/head CTAs can represent either a short-request workload or a
+    // long-context workload.  The mapping choice is a launch-time policy;
+    // it does not change the public packed layout.
+    int64_t avg_len = (T_total + N_val - 1) / N_val;
+
+    if (!v_tile_override && is_blackwell) {
+        if (N_val == 1) {
+            // The smallest legal value tile is the best B300 mapping for a
+            // single sequence with at most 16 heads.  This remains true from
+            // one short tile through long-context runs: the extra CTA-level
+            // parallelism and the smaller state/TMA slice outweigh the
+            // repeated full-D workspace loads.  The policy is independent of
+            // state I/O dtype; all three state modes were scanned.
+            if (H <= 16) {
+                v_tile = 16;
+            } else if (H <= 32 && T_total <= 64) {
+                v_tile = 16;
+            } else if (H <= 32) {
+                v_tile = 32;
+            } else if (H <= 64) {
+                v_tile = 64;
+            } else if (H <= 96 && !state_fp32) {
+                v_tile = 64;
+            } else {
+                v_tile = 128;
+            }
+        } else {
+            // Packed mode has a second useful axis: N changes the number of
+            // independent state chains.  V=32 is worthwhile for one or two
+            // chains, V=64 is the middle ground for a small/medium batch,
+            // and V=128 avoids repeating the full-D workspace traffic once
+            // there are already many heads in flight.  FP32 state conversion
+            // moves the long-context crossover to V=128 earlier.
+            if (H <= 4) {
+                // V16 is still best for the common small packed batches
+                // (N<=4).  At N>=8, H=3/4 has enough independent chains
+                // that V32 avoids the extra CTA count; H<=2 remains small
+                // enough for V16 to win in the measured N=8 case.
+                v_tile = (N_val <= 4 || H <= 2) ? 16 : 32;
+            } else if (H <= 16) {
+                if (N_val <= 2) {
+                    v_tile = 32;
+                } else if (state_fp32 && N_val >= 8 && avg_len > 256) {
+                    v_tile = 128;
+                } else if (N_val >= 16 && avg_len > 256) {
+                    v_tile = 128;
+                } else {
+                    v_tile = 64;
+                }
+            } else {
+                // For larger head counts, only a very small total number of
+                // chains benefits from duplicating q/k/workspace traffic.
+                // Keep FP32 state conservative except for the measured
+                // H<=32, N<=2 corner.
+                int64_t chain_heads = N_val * H;
+                if ((!state_fp32 && chain_heads <= 128) ||
+                    (state_fp32 && H <= 32 && N_val <= 2)) {
+                    v_tile = 64;
+                } else {
+                    v_tile = 128;
+                }
+            }
+        }
+    } else if (!v_tile_override) {
+        v_tile = 128;
+    }
+    TORCH_CHECK(v_tile == 128 || v_tile == 64 || v_tile == 32 || v_tile == 16,
+                "FLASH_KDA_V_TILE must be 128, 64, 32, or 16");
+
+    // Parallel state update is a separate compiled kernel variant because it
+    // changes the CTA's warp layout.  The default policy is intentionally
+    // narrow: on B300 it is useful when V-split leaves only one or two MMA
+    // warps per CTA, but additional update warps hurt dense V64/V128 mappings.
+    // The new STATE_UPDATE_WARPS knob allows an occupancy-vs-ILP experiment.
+    // With persistent state fragments, V32/BPW1 is fastest with four update
+    // warps for both state modes; the FP32 variant uses its lower-register
+    // C-layout U publication path.  V16 still needs eight because each update
+    // warp owns one row tile.  The
+    // same eight-warp update path is useful for V64/BPW1: its four independent
+    // state fragments per warp are enough to amortize the extra warp group,
+    // and this is the useful mapping for medium/large head counts.  V128
+    // retains the original single-warp-per-output mapping.  The old
+    // PARALLEL_STATE_UPDATE=0/1 switch remains an alias for forcing 0/8.
+    int state_update_warps =
+        is_blackwell && v_tile <= 64 ?
+            (v_tile == 32 ? 4 : 8) : 0;
+    bool state_update_warps_override = false;
+    if (const char* update_warps_env = std::getenv("FLASH_KDA_STATE_UPDATE_WARPS")) {
+        if (std::strcmp(update_warps_env, "auto") != 0 &&
+            std::strcmp(update_warps_env, "AUTO") != 0) {
+            state_update_warps = std::atoi(update_warps_env);
+            state_update_warps_override = true;
+        }
+    }
+    TORCH_CHECK(state_update_warps == 0 || state_update_warps == 4 ||
+                    state_update_warps == 8 || state_update_warps == 16,
+                "FLASH_KDA_STATE_UPDATE_WARPS must be auto, 0, 4, 8, or 16");
+
+    if (const char* parallel_env = std::getenv("FLASH_KDA_PARALLEL_STATE_UPDATE")) {
+        if (std::strcmp(parallel_env, "auto") != 0 &&
+            std::strcmp(parallel_env, "AUTO") != 0) {
+            int parallel_value = std::atoi(parallel_env);
+            TORCH_CHECK(parallel_value == 0 || parallel_value == 1,
+                        "FLASH_KDA_PARALLEL_STATE_UPDATE must be auto, 0, or 1");
+            if (!state_update_warps_override) {
+                state_update_warps = parallel_value != 0 ? 8 : 0;
+            }
+        }
+    }
+
+    int blocks_per_warp = (v_tile == 128) ? 2 : 1;
+    if (const char* blocks_env = std::getenv("FLASH_KDA_BLOCKS_PER_WARP")) {
+        blocks_per_warp = std::atoi(blocks_env);
+    }
+    TORCH_CHECK(blocks_per_warp == 1 || blocks_per_warp == 2,
+                "FLASH_KDA_BLOCKS_PER_WARP must be 1 or 2");
+    #define LAUNCH(VT, BPW, HI, HO, FP32, VL, UPDATE_WARPS) \
+        launch_fwd<128, HI, HO, FP32, VL, VT, BPW, UPDATE_WARPS>( \
             q_ptr, k_ptr, v_ptr, g_ptr, beta_t_ptr, \
             initial_state_raw, scale_f, final_state_raw, out_ptr, \
             workspace_ptr, total_tiles, \
             int(T_total), int(H), int(N_val), cu_seqlens_dev, \
             A_log_ptr, dt_bias_ptr, gate_scale, stream)
 
-    #define DISPATCH_STATE(VL) \
+    #define DISPATCH_STATE(VT, BPW, VL, UPDATE_WARPS) \
         if (!has_state_in && !has_state_out) { \
-            LAUNCH(false, false, false, VL); \
+            LAUNCH(VT, BPW, false, false, false, VL, UPDATE_WARPS); \
         } else if (has_state_in && has_state_out && state_fp32) { \
-            LAUNCH(true, true, true, VL); \
+            LAUNCH(VT, BPW, true, true, true, VL, UPDATE_WARPS); \
         } else if (has_state_in && has_state_out && !state_fp32) { \
-            LAUNCH(true, true, false, VL); \
+            LAUNCH(VT, BPW, true, true, false, VL, UPDATE_WARPS); \
         } else if (!has_state_in && has_state_out && state_fp32) { \
-            LAUNCH(false, true, true, VL); \
+            LAUNCH(VT, BPW, false, true, true, VL, UPDATE_WARPS); \
         } else if (!has_state_in && has_state_out && !state_fp32) { \
-            LAUNCH(false, true, false, VL); \
+            LAUNCH(VT, BPW, false, true, false, VL, UPDATE_WARPS); \
         } else if (has_state_in && !has_state_out && state_fp32) { \
-            LAUNCH(true, false, true, VL); \
+            LAUNCH(VT, BPW, true, false, true, VL, UPDATE_WARPS); \
         } else { \
-            LAUNCH(true, false, false, VL); \
+            LAUNCH(VT, BPW, true, false, false, VL, UPDATE_WARPS); \
         }
 
-    if (is_varlen) {
-        DISPATCH_STATE(true);
+    #define DISPATCH_MAPPING(UPDATE_WARPS) \
+        if (blocks_per_warp == 1) { \
+            if (v_tile == 128) { \
+                if (is_varlen) { DISPATCH_STATE(128, 1, true, UPDATE_WARPS); } \
+                else { DISPATCH_STATE(128, 1, false, UPDATE_WARPS); } \
+            } else if (v_tile == 64) { \
+                if (is_varlen) { DISPATCH_STATE(64, 1, true, UPDATE_WARPS); } \
+                else { DISPATCH_STATE(64, 1, false, UPDATE_WARPS); } \
+            } else if (v_tile == 32) { \
+                if (is_varlen) { DISPATCH_STATE(32, 1, true, UPDATE_WARPS); } \
+                else { DISPATCH_STATE(32, 1, false, UPDATE_WARPS); } \
+            } else { \
+                TORCH_CHECK(v_tile == 16, \
+                            "one block per warp is only instantiated for V_TILE=128, 64, 32, or 16"); \
+                if (is_varlen) { DISPATCH_STATE(16, 1, true, UPDATE_WARPS); } \
+                else { DISPATCH_STATE(16, 1, false, UPDATE_WARPS); } \
+            } \
+        } else if (v_tile == 64) { \
+            if (is_varlen) { DISPATCH_STATE(64, 2, true, UPDATE_WARPS); } \
+            else { DISPATCH_STATE(64, 2, false, UPDATE_WARPS); } \
+        } else if (v_tile == 32) { \
+            if (is_varlen) { DISPATCH_STATE(32, 2, true, UPDATE_WARPS); } \
+            else { DISPATCH_STATE(32, 2, false, UPDATE_WARPS); } \
+        } else { \
+            TORCH_CHECK(v_tile == 128, \
+                        "two blocks per warp are only instantiated for V_TILE=128, 64, or 32"); \
+            if (is_varlen) { DISPATCH_STATE(128, 2, true, UPDATE_WARPS); } \
+            else { DISPATCH_STATE(128, 2, false, UPDATE_WARPS); } \
+        }
+
+    if (state_update_warps == 16) {
+        TORCH_CHECK(blocks_per_warp == 1 && (v_tile == 32 || v_tile == 64),
+                    "16 state-update warps require V_TILE=32 or 64 and one block per warp");
+        if (v_tile == 32) {
+            if (is_varlen) { DISPATCH_STATE(32, 1, true, 16); }
+            else { DISPATCH_STATE(32, 1, false, 16); }
+        } else {
+            TORCH_CHECK(v_tile == 64,
+                        "16 state-update warps require V_TILE=32 or 64");
+            if (is_varlen) { DISPATCH_STATE(64, 1, true, 16); }
+            else { DISPATCH_STATE(64, 1, false, 16); }
+        }
+    } else if (state_update_warps == 8) {
+        DISPATCH_MAPPING(8);
+    } else if (state_update_warps == 4) {
+        DISPATCH_MAPPING(4);
     } else {
-        DISPATCH_STATE(false);
+        DISPATCH_MAPPING(0);
     }
 
+    #undef DISPATCH_MAPPING
     #undef DISPATCH_STATE
     #undef LAUNCH
 }

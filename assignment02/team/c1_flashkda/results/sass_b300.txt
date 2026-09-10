@@ -1,0 +1,25 @@
+SASS evidence from the B300-built official FlashKDA extension
+===============================================================
+
+Binary:
+  assignment02/FlashKDA/flash_kda_C.cpython-312-x86_64-linux-gnu.so
+
+Command:
+  cuobjdump --dump-sass flash_kda_C.cpython-312-x86_64-linux-gnu.so
+
+Counts in the dumped SASS:
+  HMMA.16816.F32.BF16   1520
+  HMMA.16816.F16          24
+  UTMALDG.3D            1086
+  UTCMMA / UTCHMMA / TCGEN05 / WGMMA   no matching lines in official extension
+
+Representative instructions include HMMA.16816.F32.BF16 in the recurrence
+path and UTMALDG.3D for TMA global-to-shared loads.  Thus the extension does
+use asynchronous TMA movement, but its matrix multiplication remains the
+SM80-style HMMA path; it does not contain a tcgen05 UMMA instruction.
+
+As a cross-check, the separate tcgen05 microbenchmark's SASS contains 10
+UTCHMMA instructions and 16 LDTM instructions.  That confirms the toolchain
+and architecture can emit the tcgen05/TMEM path; its absence in the official
+extension is a real code-generation/design choice rather than a B300 decoder
+limitation.
